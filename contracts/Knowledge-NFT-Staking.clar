@@ -16,6 +16,13 @@
 (define-constant ERR_INVALID_AMOUNT (err u104))
 (define-constant ERR_INSUFFICIENT_BALANCE (err u105))
 (define-constant MIN_STAKE_PERIOD u144)
+(define-constant TIER_1_BLOCKS u1008)
+(define-constant TIER_2_BLOCKS u4320)
+(define-constant TIER_3_BLOCKS u12960)
+(define-constant MULTIPLIER_BASE u100)
+(define-constant MULTIPLIER_TIER_1 u150)
+(define-constant MULTIPLIER_TIER_2 u200)
+(define-constant MULTIPLIER_TIER_3 u300)
 
 (define-data-var next-module-id uint u1)
 (define-data-var total-rewards-pool uint u0)
@@ -112,12 +119,16 @@
       (ok true))))
 
 (define-public (unstake-nft (nft-contract principal) (token-id uint))
-  (let ((stake-data (unwrap! (map-get? staked-nfts { nft-contract: nft-contract, token-id: token-id }) ERR_NOT_STAKED)))
+  (let ((stake-data (unwrap! (map-get? staked-nfts { nft-contract: nft-contract, token-id: token-id }) ERR_NOT_STAKED))
+        (stake-duration (- stacks-block-height (get stake-block stake-data)))
+        (multiplier (calculate-multiplier stake-duration))
+        (base-reward (get reward-earned stake-data))
+        (boosted-reward (apply-multiplier base-reward multiplier)))
     (begin
       (asserts! (is-eq (get staker stake-data) tx-sender) ERR_UNAUTHORIZED)
       (asserts! (>= stacks-block-height (+ (get stake-block stake-data) MIN_STAKE_PERIOD)) ERR_UNAUTHORIZED)
-      (if (> (get reward-earned stake-data) u0)
-        (try! (ft-mint? knowledge-token (get reward-earned stake-data) tx-sender))
+      (if (> boosted-reward u0)
+        (try! (ft-mint? knowledge-token boosted-reward tx-sender))
         false)
       (map-delete staked-nfts { nft-contract: nft-contract, token-id: token-id })
       (map-set user-stakes
@@ -132,7 +143,7 @@
             total-rewards: (+ (get total-rewards 
                                   (default-to { total-staked: u0, total-rewards: u0 } 
                                              (map-get? user-stakes { user: tx-sender }))) 
-                             (get reward-earned stake-data))
+                             boosted-reward)
           }))
       (ok true))))
 
@@ -180,6 +191,18 @@
     (var-set total-rewards-pool (+ (var-get total-rewards-pool) amount))
     (ok true)))
 
+(define-private (calculate-multiplier (stake-duration uint))
+  (if (>= stake-duration TIER_3_BLOCKS)
+    MULTIPLIER_TIER_3
+    (if (>= stake-duration TIER_2_BLOCKS)
+      MULTIPLIER_TIER_2
+      (if (>= stake-duration TIER_1_BLOCKS)
+        MULTIPLIER_TIER_1
+        MULTIPLIER_BASE))))
+
+(define-private (apply-multiplier (base-reward uint) (multiplier uint))
+  (/ (* base-reward multiplier) MULTIPLIER_BASE))
+
 (define-private (distribute-staker-rewards (module-id uint))
   (let ((reward-per-staker u10))
     (begin
@@ -212,3 +235,19 @@
 
 (define-read-only (get-token-balance (user principal))
   (ft-get-balance knowledge-token user))
+
+(define-read-only (get-stake-multiplier (nft-contract principal) (token-id uint))
+  (match (map-get? staked-nfts { nft-contract: nft-contract, token-id: token-id })
+    stake-data
+      (let ((stake-duration (- stacks-block-height (get stake-block stake-data))))
+        (ok (calculate-multiplier stake-duration)))
+    ERR_NOT_STAKED))
+
+(define-read-only (get-boosted-rewards (nft-contract principal) (token-id uint))
+  (match (map-get? staked-nfts { nft-contract: nft-contract, token-id: token-id })
+    stake-data
+      (let ((stake-duration (- stacks-block-height (get stake-block stake-data)))
+            (multiplier (calculate-multiplier stake-duration))
+            (base-reward (get reward-earned stake-data)))
+        (ok (apply-multiplier base-reward multiplier)))
+    ERR_NOT_STAKED))
